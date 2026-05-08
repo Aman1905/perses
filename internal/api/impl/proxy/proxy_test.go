@@ -17,7 +17,11 @@ import (
 	"crypto/tls"
 	"testing"
 
+	"github.com/perses/perses/internal/api/crypto"
+	"github.com/perses/perses/pkg/model/api/config"
+	v1 "github.com/perses/perses/pkg/model/api/v1"
 	datasourceSQL "github.com/perses/perses/pkg/model/api/v1/datasource/sql"
+	"github.com/perses/perses/pkg/model/api/v1/secret"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -255,4 +259,89 @@ func TestSQLProxy_sqlOpen(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoadProxySecret_ReEncryptsLegacyFormat(t *testing.T) {
+	// Create a real crypto instance
+	sec := config.Security{
+		EncryptionKey: "=tW$56zytgB&3jN2E%7-+qrGZE?v6LCc",
+	}
+	require.NoError(t, sec.Verify())
+	c, _, err := crypto.New(sec)
+	require.NoError(t, err)
+
+	// Create a secret and encrypt it
+	originalPassword := "mysecretpassword"
+	spec := &v1.SecretSpec{
+		BasicAuth: &secret.BasicAuth{
+			Username: "user",
+			Password: originalPassword,
+		},
+	}
+	require.NoError(t, c.Encrypt(spec))
+	encryptedPassword := spec.BasicAuth.Password
+
+	// Decrypt it so it's back to plaintext, then re-encrypt with old CFB to simulate legacy data
+	// Instead, let's just use the encrypted data directly and verify the flow.
+	// Since we encrypted with GCM, shouldReencrypt will be false.
+	// To test re-encryption, we need a mock that returns shouldReencrypt=true.
+	// But actually, we can test the real flow: encrypt → loadProxySecret → no re-encryption needed.
+	// And test with a mock crypto that forces re-encryption.
+
+	// Test 1: GCM-encrypted secret should NOT trigger re-encryption
+	updateCalled := false
+	_, err = loadProxySecret(c, "my-secret",
+		func(name string) (*v1.SecretSpec, error) {
+			return &v1.SecretSpec{
+				BasicAuth: &secret.BasicAuth{
+					Username: "user",
+					Password: encryptedPassword,
+				},
+			}, nil
+		},
+		func(name string, spec *v1.SecretSpec) error {
+			updateCalled = true
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	assert.False(t, updateCalled, "updateSecret should NOT be called for GCM-encrypted data")
+
+	// Test 2: Use a fake crypto that simulates legacy format (shouldReencrypt=true)
+	var savedSpec *v1.SecretSpec
+	_, err = loadProxySecret(&fakeLegacyCrypto{}, "my-secret",
+		func(name string) (*v1.SecretSpec, error) {
+			return &v1.SecretSpec{
+				//nolint: gosec
+				BasicAuth: &secret.BasicAuth{
+					Username: "user",
+					Password: "some-old-encrypted-value",
+				},
+			}, nil
+		},
+		func(name string, spec *v1.SecretSpec) error {
+			savedSpec = spec
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, savedSpec, "updateSecret should have been called for legacy-encrypted data")
+	assert.Equal(t, "re-encrypted", savedSpec.BasicAuth.Password)
+}
+
+// fakeLegacyCrypto simulates a crypto that always returns shouldReencrypt=true on Decrypt
+type fakeLegacyCrypto struct{}
+
+func (f *fakeLegacyCrypto) Encrypt(spec *v1.SecretSpec) error {
+	if spec.BasicAuth != nil {
+		spec.BasicAuth.Password = "re-encrypted"
+	}
+	return nil
+}
+
+func (f *fakeLegacyCrypto) Decrypt(spec *v1.SecretSpec) (bool, error) {
+	if spec.BasicAuth != nil {
+		spec.BasicAuth.Password = "decrypted"
+	}
+	return true, nil
 }

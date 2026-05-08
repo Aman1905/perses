@@ -30,6 +30,8 @@ func (e *endpoint) proxyProjectDatasource(ctx echo.Context, projectName, dtsName
 	path := ctx.Param("*")
 	pr, err := newProxy(dtsName, projectName, spec, path, e.crypto, func(name string) (*v1.SecretSpec, error) {
 		return e.getProjectSecret(projectName, dtsName, name)
+	}, func(name string, spec *v1.SecretSpec) error {
+		return e.updateProjectSecret(projectName, name, spec)
 	})
 	if err != nil {
 		return err
@@ -90,11 +92,24 @@ func (e *endpoint) getProjectSecret(projectName string, dtsName string, name str
 	scrt, err := e.secret.Get(projectName, name)
 	if err != nil {
 		if databaseModel.IsKeyNotFound(err) {
-			logrus.Debugf("unable to find the Datasource %q", name)
+			logrus.Debugf("unable to find the Secret %q in project %q", name, projectName)
 			return nil, apiinterface.HandleNotFoundError(fmt.Sprintf("unable to forward the request to the datasource %q, secret %q attached doesn't exist", dtsName, name))
 		}
 		logrus.WithError(err).Errorf("unable to find the secret %q attached to the datasource %q, something wrong with the database", name, dtsName)
 		return nil, apiinterface.InternalError
 	}
 	return &scrt.Spec, nil
+}
+
+func (e *endpoint) updateProjectSecret(projectName string, name string, spec *v1.SecretSpec) error {
+	scrt, err := e.secret.Get(projectName, name)
+	if err != nil {
+		// This method is used in context of reencryption of the fly. In that context, this error will only be warned in the log.
+		// No need to wrap it like in e.getProjectSecret() method
+		return err
+	}
+
+	scrt.Spec = *spec
+
+	return e.secret.Update(scrt)
 }

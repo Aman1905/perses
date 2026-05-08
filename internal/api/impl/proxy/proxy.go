@@ -193,7 +193,7 @@ type proxy interface {
 	serve(c echo.Context) error
 }
 
-func newProxy(datasourceName, projectName string, spec datasourceSpec.Spec, path string, crypto crypto.Crypto, retrieveSecret func(name string) (*v1.SecretSpec, error)) (proxy, error) {
+func newProxy(datasourceName, projectName string, spec datasourceSpec.Spec, path string, crypto crypto.Crypto, retrieveSecret func(name string) (*v1.SecretSpec, error), updateSecret func(name string, spec *v1.SecretSpec) error) (proxy, error) {
 	cfg, kind, err := datasourcev1.ValidateAndExtract(spec.Plugin.Spec)
 	if err != nil {
 		logrus.WithError(err).WithFields(map[string]interface{}{
@@ -212,17 +212,14 @@ func newProxy(datasourceName, projectName string, spec datasourceSpec.Spec, path
 	switch kind {
 	case datasourceHTTP.ProxyKindName:
 		httpConfig := cfg.(*datasourceHTTP.Config)
-		if len(httpConfig.Secret) > 0 {
-			scrt, err = retrieveSecret(httpConfig.Secret)
+		if scrtName := httpConfig.Secret; len(scrtName) > 0 {
+			scrt, err = loadProxySecret(crypto, scrtName, retrieveSecret, updateSecret)
 			if err != nil {
-				return nil, err
-			}
-			if _, decryptErr := crypto.Decrypt(scrt); decryptErr != nil {
-				logrus.WithError(decryptErr).WithFields(map[string]interface{}{
+				logrus.WithError(err).WithFields(map[string]interface{}{
 					datasourceFieldLog: datasourceName,
 					projectFieldLog:    projectForLog(projectName),
 				}).Error("unable to decrypt the datasource secret")
-				return nil, apiinterface.InternalError
+				return nil, err
 			}
 		}
 		return &httpProxy{
@@ -233,17 +230,14 @@ func newProxy(datasourceName, projectName string, spec datasourceSpec.Spec, path
 		}, nil
 	case datasourceSQL.ProxyKindName:
 		sqlConfig := cfg.(*datasourceSQL.Config)
-		if len(sqlConfig.Secret) > 0 {
-			scrt, err = retrieveSecret(sqlConfig.Secret)
+		if scrtName := sqlConfig.Secret; len(scrtName) > 0 {
+			scrt, err = loadProxySecret(crypto, scrtName, retrieveSecret, updateSecret)
 			if err != nil {
-				return nil, err
-			}
-			if _, decryptErr := crypto.Decrypt(scrt); decryptErr != nil {
-				logrus.WithError(decryptErr).WithFields(map[string]interface{}{
+				logrus.WithError(err).WithFields(map[string]interface{}{
 					datasourceFieldLog: datasourceName,
 					projectFieldLog:    projectForLog(projectName),
 				}).Error("unable to decrypt the datasource secret")
-				return nil, apiinterface.InternalError
+				return nil, err
 			}
 		}
 		return &sqlProxy{
@@ -256,6 +250,28 @@ func newProxy(datasourceName, projectName string, spec datasourceSpec.Spec, path
 	default:
 		return nil, errors.New("no proxy kind found")
 	}
+}
+
+func loadProxySecret(crypto crypto.Crypto, name string, retrieveSecret func(name string) (*v1.SecretSpec, error), updateSecret func(name string, spec *v1.SecretSpec) error) (*v1.SecretSpec, error) {
+	scrt, err := retrieveSecret(name)
+	if err != nil {
+		return nil, err
+	}
+	shouldReencrypt, decryptErr := crypto.Decrypt(scrt)
+	if decryptErr != nil {
+		return nil, apiinterface.InternalError
+	}
+	if shouldReencrypt {
+		reencryptErr := crypto.Encrypt(scrt)
+		if reencryptErr != nil {
+			return nil, apiinterface.InternalError
+		}
+		saveErr := updateSecret(name, scrt)
+		if saveErr != nil {
+			logrus.WithError(saveErr).Warn("unable to save the secret with the re-encrypted data, you might want to check your encryption configuration and re-encrypt your secrets to avoid this warning in the future")
+		}
+	}
+	return scrt, nil
 }
 
 type httpProxy struct {

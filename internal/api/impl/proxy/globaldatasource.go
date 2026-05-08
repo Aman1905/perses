@@ -31,6 +31,8 @@ func (e *endpoint) proxyGlobalDatasource(ctx echo.Context, datasourceName string
 
 	pr, err := newProxy(datasourceName, "", spec, path, e.crypto, func(name string) (*v1.SecretSpec, error) {
 		return e.getGlobalSecret(datasourceName, name)
+	}, func(name string, spec *v1.SecretSpec) error {
+		return e.updateGlobalSecret(name, spec)
 	})
 	if err != nil {
 		return err
@@ -97,4 +99,17 @@ func (e *endpoint) getGlobalSecret(dtsName, name string) (*v1.SecretSpec, error)
 	}
 
 	return &scrt.Spec, nil
+}
+
+func (e *endpoint) updateGlobalSecret(name string, spec *v1.SecretSpec) error {
+	scrt, err := e.globalSecret.Get(name)
+	if err != nil {
+		// This method is used in context of reencryption of the fly. In that context, this error will only be warned in the log.
+		// No need to wrap it like in e.getGlobalSecret() method
+		return err
+	}
+
+	scrt.Spec = *spec
+
+	return e.globalSecret.Update(scrt)
 }

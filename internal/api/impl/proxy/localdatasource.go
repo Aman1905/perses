@@ -31,6 +31,8 @@ func (e *endpoint) proxyDashboardDatasource(ctx echo.Context, projectName, dtsNa
 
 	pr, err := newProxy(dtsName, projectName, spec, path, e.crypto, func(name string) (*v1.SecretSpec, error) {
 		return e.getProjectSecret(projectName, dtsName, name)
+	}, func(name string, spec *v1.SecretSpec) error {
+		return e.updateProjectSecret(projectName, name, spec)
 	})
 	if err != nil {
 		return err
