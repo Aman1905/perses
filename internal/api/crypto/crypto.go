@@ -27,11 +27,11 @@ import (
 	modelV1 "github.com/perses/perses/pkg/model/api/v1"
 )
 
-// based on https://www.golinuxcloud.com/golang-encrypt-decrypt/
-
 type Crypto interface {
 	Encrypt(spec *modelV1.SecretSpec) error
-	Decrypt(spec *modelV1.SecretSpec) error
+	// Decrypt decrypts the spec fields in place.
+	// Returns true if the data was encrypted with the old format and needs re-encryption.
+	Decrypt(spec *modelV1.SecretSpec) (bool, error)
 }
 
 func New(security config.Security) (Crypto, JWT, error) {
@@ -106,80 +106,107 @@ func (c *crypto) Encrypt(spec *modelV1.SecretSpec) error {
 	return nil
 }
 
-func (c *crypto) Decrypt(spec *modelV1.SecretSpec) error {
-	basicAuth := spec.BasicAuth
-	if basicAuth != nil {
-		decryptedPassword, err := c.decrypt(basicAuth.Password)
+func (c *crypto) Decrypt(spec *modelV1.SecretSpec) (bool, error) {
+	needsReEncryption := false
+
+	if spec.BasicAuth != nil {
+		decrypted, legacy, err := c.decrypt(spec.BasicAuth.Password)
 		if err != nil {
-			return err
+			return false, err
 		}
-		basicAuth.Password = decryptedPassword
+		spec.BasicAuth.Password = decrypted
+		needsReEncryption = needsReEncryption || legacy
 	}
 
-	authorization := spec.Authorization
-	if authorization != nil {
-		decryptedCredentials, err := c.decrypt(authorization.Credentials)
+	if spec.Authorization != nil {
+		decrypted, legacy, err := c.decrypt(spec.Authorization.Credentials)
 		if err != nil {
-			return err
+			return false, err
 		}
-		authorization.Credentials = decryptedCredentials
+		spec.Authorization.Credentials = decrypted
+		needsReEncryption = needsReEncryption || legacy
 	}
 
-	oauth := spec.OAuth
-	if oauth != nil {
-		decryptedClientID, err := c.decrypt(oauth.ClientID)
+	if spec.OAuth != nil {
+		decrypted, legacy, err := c.decrypt(spec.OAuth.ClientID)
 		if err != nil {
-			return err
+			return false, err
 		}
-		oauth.ClientID = decryptedClientID
+		spec.OAuth.ClientID = decrypted
+		needsReEncryption = needsReEncryption || legacy
 
-		decryptedClientSecret, err := c.decrypt(oauth.ClientSecret)
+		decrypted, legacy, err = c.decrypt(spec.OAuth.ClientSecret)
 		if err != nil {
-			return err
+			return false, err
 		}
-		oauth.ClientSecret = decryptedClientSecret
+		spec.OAuth.ClientSecret = decrypted
+		needsReEncryption = needsReEncryption || legacy
 	}
 
-	tlsConfig := spec.TLSConfig
-	if tlsConfig != nil {
-		decryptedKey, err := c.decrypt(tlsConfig.Key)
+	if spec.TLSConfig != nil {
+		decrypted, legacy, err := c.decrypt(spec.TLSConfig.Key)
 		if err != nil {
-			return err
+			return false, err
 		}
-		tlsConfig.Key = decryptedKey
+		spec.TLSConfig.Key = decrypted
+		needsReEncryption = needsReEncryption || legacy
 	}
-	return nil
+
+	return needsReEncryption, nil
 }
 
+// encrypt uses AES-GCM (AEAD) to encrypt the string.
+// The returned string is base64 encoded and contains the nonce as prefix.
 func (c *crypto) encrypt(stringToEncrypt string) (string, error) {
 	if len(stringToEncrypt) == 0 {
 		return "", nil
 	}
-	plainText := []byte(stringToEncrypt)
-	cipherText := make([]byte, aes.BlockSize+len(plainText))
-	iv := cipherText[:aes.BlockSize]
-	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
-		return "", err
-	}
 
-	// TODO use AEAD instead of CFB as recommended by Go
-	stream := cipher.NewCFBEncrypter(c.block, iv) //nolint: staticcheck
-	stream.XORKeyStream(cipherText[aes.BlockSize:], plainText)
-
-	return base64.URLEncoding.EncodeToString(cipherText), nil
-}
-
-func (c *crypto) decrypt(stringToDecrypt string) (string, error) {
-	if len(stringToDecrypt) == 0 {
-		return "", nil
-	}
-	cipherText, err := base64.URLEncoding.DecodeString(stringToDecrypt)
+	gcm, err := cipher.NewGCM(c.block)
 	if err != nil {
 		return "", err
 	}
-	if len(cipherText) < aes.BlockSize {
-		return "", fmt.Errorf("ciphertext too short")
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", err
 	}
+
+	cipherText := gcm.Seal(nonce, nonce, []byte(stringToEncrypt), nil)
+	return base64.URLEncoding.EncodeToString(cipherText), nil
+}
+
+// decrypt tries AES-GCM (AEAD) first. If it fails, falls back to the old CFB format.
+// Returns (plaintext, needsReEncryption, error).
+func (c *crypto) decrypt(stringToDecrypt string) (string, bool, error) {
+	if len(stringToDecrypt) == 0 {
+		return "", false, nil
+	}
+
+	cipherText, err := base64.URLEncoding.DecodeString(stringToDecrypt)
+	if err != nil {
+		return "", false, err
+	}
+
+	// Try GCM first
+	gcm, err := cipher.NewGCM(c.block)
+	if err != nil {
+		return "", false, err
+	}
+
+	if len(cipherText) >= gcm.NonceSize() {
+		nonce := cipherText[:gcm.NonceSize()]
+		plainText, err := gcm.Open(nil, nonce, cipherText[gcm.NonceSize():], nil)
+		if err == nil {
+			return string(plainText), false, nil
+		}
+	}
+
+	// Fallback to old CFB format
+	if len(cipherText) < aes.BlockSize {
+		return "", false, fmt.Errorf("ciphertext too short")
+	}
+
 	iv := cipherText[:aes.BlockSize]
 	cipherText = cipherText[aes.BlockSize:]
 
@@ -189,5 +216,5 @@ func (c *crypto) decrypt(stringToDecrypt string) (string, error) {
 	// XORKeyStream can work in-place if the two arguments are the same.
 	stream.XORKeyStream(cipherText, cipherText)
 
-	return string(cipherText), nil
+	return string(cipherText), true, nil
 }
