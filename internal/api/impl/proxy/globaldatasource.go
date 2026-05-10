@@ -14,16 +14,11 @@
 package proxy
 
 import (
-	"fmt"
-
 	"github.com/labstack/echo/v4"
-	databaseModel "github.com/perses/perses/internal/api/database/model"
-	apiinterface "github.com/perses/perses/internal/api/interface"
 	"github.com/perses/perses/internal/api/utils"
 	v1 "github.com/perses/perses/pkg/model/api/v1"
 	"github.com/perses/perses/pkg/model/api/v1/role"
 	"github.com/perses/spec/go/datasource"
-	"github.com/sirupsen/logrus"
 )
 
 func (e *endpoint) proxyGlobalDatasource(ctx echo.Context, datasourceName string, spec datasource.Spec) error {
@@ -32,7 +27,7 @@ func (e *endpoint) proxyGlobalDatasource(ctx echo.Context, datasourceName string
 	pr, err := newProxy(datasourceName, "", spec, path, e.crypto, func(name string) (*v1.SecretSpec, error) {
 		return e.getGlobalSecret(datasourceName, name)
 	}, func(name string, spec *v1.SecretSpec) error {
-		return e.updateGlobalSecret(name, spec)
+		return e.updateGlobalSecret(datasourceName, name, spec)
 	})
 	if err != nil {
 		return err
@@ -76,40 +71,24 @@ func (e *endpoint) proxySavedGlobalDatasource(ctx echo.Context) error {
 
 func (e *endpoint) getGlobalDatasource(name string) (*v1.GlobalDatasource, error) {
 	dts, err := e.globalDTS.Get(name)
-	if err != nil {
-		if databaseModel.IsKeyNotFound(err) {
-			logrus.Debugf("unable to find the Datasource %q", name)
-			return nil, apiinterface.HandleNotFoundError(fmt.Sprintf("unable to forward the request to the datasource %q, datasource doesn't exist", name))
-		}
-		logrus.WithError(err).Errorf("unable to find the datasource %q, something wrong with the database", name)
-		return nil, apiinterface.InternalError
-	}
-	return dts, nil
+	return dts, handleGlobalDatasourceError(name, "get", err)
 }
 
 func (e *endpoint) getGlobalSecret(dtsName, name string) (*v1.SecretSpec, error) {
 	scrt, err := e.globalSecret.Get(name)
 	if err != nil {
-		if databaseModel.IsKeyNotFound(err) {
-			logrus.Debugf("unable to find the GlobalSecret %q", name)
-			return nil, apiinterface.HandleNotFoundError(fmt.Sprintf("unable to forward the request to the datasource %q, secret %q attached doesn't exist", dtsName, name))
-		}
-		logrus.WithError(err).Errorf("unable to find the secret %q attached to the datasource %q, something wrong with the database", name, dtsName)
-		return nil, apiinterface.InternalError
+		return nil, handleGlobalSecretError(dtsName, name, "get", err)
 	}
 
 	return &scrt.Spec, nil
 }
 
-func (e *endpoint) updateGlobalSecret(name string, spec *v1.SecretSpec) error {
+func (e *endpoint) updateGlobalSecret(dtsName, name string, spec *v1.SecretSpec) error {
 	scrt, err := e.globalSecret.Get(name)
 	if err != nil {
-		// This method is used in context of reencryption of the fly. In that context, this error will only be warned in the log.
-		// No need to wrap it like in e.getGlobalSecret() method
-		return err
+		return handleGlobalSecretError(dtsName, name, "get", err)
 	}
 
 	scrt.Spec = *spec
-
-	return e.globalSecret.Update(scrt)
+	return handleGlobalSecretError(dtsName, name, "update", e.globalSecret.Update(scrt))
 }

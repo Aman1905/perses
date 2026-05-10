@@ -14,16 +14,11 @@
 package proxy
 
 import (
-	"fmt"
-
 	"github.com/labstack/echo/v4"
-	databaseModel "github.com/perses/perses/internal/api/database/model"
-	apiinterface "github.com/perses/perses/internal/api/interface"
 	"github.com/perses/perses/internal/api/utils"
 	v1 "github.com/perses/perses/pkg/model/api/v1"
 	"github.com/perses/perses/pkg/model/api/v1/role"
 	"github.com/perses/spec/go/datasource"
-	"github.com/sirupsen/logrus"
 )
 
 func (e *endpoint) proxyProjectDatasource(ctx echo.Context, projectName, dtsName string, spec datasource.Spec) error {
@@ -31,7 +26,7 @@ func (e *endpoint) proxyProjectDatasource(ctx echo.Context, projectName, dtsName
 	pr, err := newProxy(dtsName, projectName, spec, path, e.crypto, func(name string) (*v1.SecretSpec, error) {
 		return e.getProjectSecret(projectName, dtsName, name)
 	}, func(name string, spec *v1.SecretSpec) error {
-		return e.updateProjectSecret(projectName, name, spec)
+		return e.updateProjectSecret(projectName, dtsName, name, spec)
 	})
 	if err != nil {
 		return err
@@ -75,41 +70,29 @@ func (e *endpoint) proxySavedProjectDatasource(ctx echo.Context) error {
 	return e.proxyProjectDatasource(ctx, projectName, dtsName, dts)
 }
 
-func (e *endpoint) getProjectDatasource(projectName string, name string) (datasource.Spec, error) {
+func (e *endpoint) getProjectDatasource(projectName, name string) (datasource.Spec, error) {
 	dts, err := e.dts.Get(projectName, name)
 	if err != nil {
-		if databaseModel.IsKeyNotFound(err) {
-			logrus.Debugf("unable to find the Datasource %q in project %q", name, projectName)
-			return datasource.Spec{}, apiinterface.HandleNotFoundError(fmt.Sprintf("unable to forward the request to the datasource %q, datasource doesn't exist", name))
-		}
-		logrus.WithError(err).Errorf("unable to find the datasource %q, something wrong with the database", name)
-		return datasource.Spec{}, apiinterface.InternalError
+		return datasource.Spec{}, handleProjectDatasourceError(projectName, name, "get", err)
 	}
 	return dts.Spec, nil
 }
 
-func (e *endpoint) getProjectSecret(projectName string, dtsName string, name string) (*v1.SecretSpec, error) {
+func (e *endpoint) getProjectSecret(projectName, dtsName, name string) (*v1.SecretSpec, error) {
 	scrt, err := e.secret.Get(projectName, name)
 	if err != nil {
-		if databaseModel.IsKeyNotFound(err) {
-			logrus.Debugf("unable to find the Secret %q in project %q", name, projectName)
-			return nil, apiinterface.HandleNotFoundError(fmt.Sprintf("unable to forward the request to the datasource %q, secret %q attached doesn't exist", dtsName, name))
-		}
-		logrus.WithError(err).Errorf("unable to find the secret %q attached to the datasource %q, something wrong with the database", name, dtsName)
-		return nil, apiinterface.InternalError
+		return nil, handleProjectSecretError(projectName, dtsName, name, "get", err)
 	}
 	return &scrt.Spec, nil
 }
 
-func (e *endpoint) updateProjectSecret(projectName string, name string, spec *v1.SecretSpec) error {
+func (e *endpoint) updateProjectSecret(projectName, dtsName, name string, spec *v1.SecretSpec) error {
 	scrt, err := e.secret.Get(projectName, name)
 	if err != nil {
-		// This method is used in context of reencryption of the fly. In that context, this error will only be warned in the log.
-		// No need to wrap it like in e.getProjectSecret() method
-		return err
+		return handleProjectSecretError(projectName, dtsName, name, "get", err)
 	}
 
 	scrt.Spec = *spec
 
-	return e.secret.Update(scrt)
+	return handleProjectSecretError(projectName, dtsName, name, "update", e.secret.Update(scrt))
 }

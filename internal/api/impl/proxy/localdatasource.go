@@ -17,7 +17,6 @@ import (
 	"fmt"
 
 	"github.com/labstack/echo/v4"
-	databaseModel "github.com/perses/perses/internal/api/database/model"
 	apiinterface "github.com/perses/perses/internal/api/interface"
 	"github.com/perses/perses/internal/api/utils"
 	v1 "github.com/perses/perses/pkg/model/api/v1"
@@ -32,7 +31,7 @@ func (e *endpoint) proxyDashboardDatasource(ctx echo.Context, projectName, dtsNa
 	pr, err := newProxy(dtsName, projectName, spec, path, e.crypto, func(name string) (*v1.SecretSpec, error) {
 		return e.getProjectSecret(projectName, dtsName, name)
 	}, func(name string, spec *v1.SecretSpec) error {
-		return e.updateProjectSecret(projectName, name, spec)
+		return e.updateProjectSecret(projectName, dtsName, name, spec)
 	})
 	if err != nil {
 		return err
@@ -81,12 +80,7 @@ func (e *endpoint) proxySavedDashboardDatasource(ctx echo.Context) error {
 func (e *endpoint) getDashboardDatasource(projectName string, dashboardName string, name string) (datasource.Spec, error) {
 	db, err := e.dashboard.Get(projectName, dashboardName)
 	if err != nil {
-		if databaseModel.IsKeyNotFound(err) {
-			logrus.Debugf("unable to find the Dashboard %q in project %q", dashboardName, projectName)
-			return datasource.Spec{}, apiinterface.HandleNotFoundError(fmt.Sprintf("unable to forward the request to the datasource %q, datasource doesn't exist", name))
-		}
-		logrus.WithError(err).Errorf("unable to find the datasource %q, something wrong with the database", name)
-		return datasource.Spec{}, apiinterface.InternalError
+		return datasource.Spec{}, handleProjectDashboardError(projectName, dashboardName, name, "get", err)
 	}
 	dtsSpec, ok := db.Spec.Datasources[name]
 	if !ok {
